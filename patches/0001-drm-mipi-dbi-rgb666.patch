@@ -1,0 +1,234 @@
+--- a/drivers/gpu/drm/drm_mipi_dbi.c
++++ b/drivers/gpu/drm/drm_mipi_dbi.c
+@@ -223,8 +223,14 @@
+ 		else
+ 			drm_fb_memcpy(&dst_map, NULL, data, fb, clip);
+ 		break;
++	case DRM_FORMAT_RGB888:
++		drm_fb_memcpy(&dst_map, NULL, data, fb, clip);
++		break;
+ 	case DRM_FORMAT_XRGB8888:
+-		drm_fb_xrgb8888_to_rgb565(&dst_map, NULL, data, fb, clip, swap);
++		if (drm_to_mipi_dbi_dev(fb->dev)->pixel_format == DRM_FORMAT_RGB888)
++			drm_fb_xrgb8888_to_rgb888(&dst_map, NULL, data, fb, clip);
++		else
++			drm_fb_xrgb8888_to_rgb565(&dst_map, NULL, data, fb, clip, swap);
+ 		break;
+ 	default:
+ 		drm_err_once(fb->dev, "Format is not supported: %p4cc\n",
+@@ -265,8 +271,11 @@
+ 	unsigned int height = rect->y2 - rect->y1;
+ 	unsigned int width = rect->x2 - rect->x1;
+ 	struct mipi_dbi *dbi = &dbidev->dbi;
++	const struct drm_format_info *dst_format;
+ 	bool swap = dbi->swap_bytes;
+ 	int idx, ret = 0;
++	u32 dst_fourcc;
++	size_t len;
+ 	bool full;
+ 	void *tr;
+ 
+@@ -297,8 +306,16 @@
+ 	mipi_dbi_set_window_address(dbidev, rect->x1, rect->x2 - 1, rect->y1,
+ 				    rect->y2 - 1);
+ 
+-	ret = mipi_dbi_command_buf(dbi, MIPI_DCS_WRITE_MEMORY_START, tr,
+-				   width * height * 2);
++	if (fb->format->format == DRM_FORMAT_XRGB8888 && dbidev->pixel_format)
++		dst_fourcc = dbidev->pixel_format;
++	else if (fb->format->format == DRM_FORMAT_RGB888)
++		dst_fourcc = DRM_FORMAT_RGB888;
++	else
++		dst_fourcc = DRM_FORMAT_RGB565;
++	dst_format = drm_format_info(dst_fourcc);
++	len = drm_format_info_min_pitch(dst_format, 0, width) * height;
++
++	ret = mipi_dbi_command_buf(dbi, MIPI_DCS_WRITE_MEMORY_START, tr, len);
+ err_msg:
+ 	if (ret)
+ 		drm_err_once(fb->dev, "Failed to update display %d\n", ret);
+@@ -391,7 +408,9 @@
+ 	u16 height = drm->mode_config.min_height;
+ 	u16 width = drm->mode_config.min_width;
+ 	struct mipi_dbi *dbi = &dbidev->dbi;
+-	size_t len = width * height * 2;
++	u32 format = dbidev->pixel_format ? dbidev->pixel_format : DRM_FORMAT_RGB565;
++	const struct drm_format_info *dst_format = drm_format_info(format);
++	size_t len = drm_format_info_min_pitch(dst_format, 0, width) * height;
+ 	int idx;
+ 
+ 	if (!drm_dev_enter(drm, &idx))
+@@ -580,6 +599,7 @@
+ {
+ 	size_t bufsize = mode->vdisplay * mode->hdisplay * sizeof(u16);
+ 
++	dbidev->pixel_format = DRM_FORMAT_RGB565;
+ 	dbidev->drm.mode_config.preferred_depth = 16;
+ 
+ 	return mipi_dbi_dev_init_with_formats(dbidev, funcs, mipi_dbi_formats,
+@@ -995,8 +1015,11 @@
+ static int mipi_dbi_typec1_command(struct mipi_dbi *dbi, u8 *cmd,
+ 				   u8 *parameters, size_t num)
+ {
+-	unsigned int bpw = (*cmd == MIPI_DCS_WRITE_MEMORY_START) ? 16 : 8;
++	unsigned int bpw = 8;
+ 	int ret;
++
++	if (*cmd == MIPI_DCS_WRITE_MEMORY_START)
++		bpw = dbi->write_memory_bpw ? dbi->write_memory_bpw : 16;
+ 
+ 	if (mipi_dbi_command_is_read(dbi, *cmd))
+ 		return mipi_dbi_typec1_command_read(dbi, cmd, parameters, num);
+@@ -1096,7 +1119,7 @@
+ 		return ret;
+ 
+ 	if (*cmd == MIPI_DCS_WRITE_MEMORY_START && !dbi->swap_bytes)
+-		bpw = 16;
++		bpw = dbi->write_memory_bpw ? dbi->write_memory_bpw : 16;
+ 
+ 	gpiod_set_value_cansleep(dbi->dc, 1);
+ 	speed_hz = mipi_dbi_spi_cmd_max_speed(spi, num);
+@@ -1152,6 +1175,7 @@
+ 
+ 	dbi->spi = spi;
+ 	dbi->read_commands = mipi_dbi_dcs_read_commands;
++	dbi->write_memory_bpw = 16;
+ 
+ 	if (dc) {
+ 		dbi->command = mipi_dbi_typec3_command;
+--- a/include/drm/drm_mipi_dbi.h
++++ b/include/drm/drm_mipi_dbi.h
+@@ -43,6 +43,13 @@
+ 	bool swap_bytes;
+ 
+ 	/**
++	 * @write_memory_bpw: Bits per word used for MIPI_DCS_WRITE_MEMORY_START.
++	 *                    16 for RGB565, 8 for RGB888 so RGB666 panels see
++	 *                    b6x2g6x2r6x2 on the wire.
++	 */
++	u8 write_memory_bpw;
++
++	/**
+ 	 * @reset: Optional reset gpio
+ 	 */
+ 	struct gpio_desc *reset;
+@@ -105,6 +112,12 @@
+ 	unsigned int rotation;
+ 
+ 	/**
++	 * @pixel_format: Native pixel format (DRM_FORMAT_*).
++	 *                0 is treated as DRM_FORMAT_RGB565.
++	 */
++	u32 pixel_format;
++
++	/**
+ 	 * @left_offset: Horizontal offset of the display relative to the
+ 	 *               controller's driver array
+ 	 */
+--- a/drivers/gpu/drm/tiny/panel-mipi-dbi.c
++++ b/drivers/gpu/drm/tiny/panel-mipi-dbi.c
+@@ -9,10 +9,12 @@
+ #include <linux/delay.h>
+ #include <linux/firmware.h>
+ #include <linux/gpio/consumer.h>
++#include <linux/kernel.h>
+ #include <linux/module.h>
+ #include <linux/property.h>
+ #include <linux/regulator/consumer.h>
+ #include <linux/spi/spi.h>
++#include <linux/string.h>
+ 
+ #include <drm/drm_atomic_helper.h>
+ #include <drm/drm_drv.h>
+@@ -270,7 +272,49 @@
+ 
+ 	return 0;
+ }
++
++struct panel_mipi_dbi_format {
++	const char *name;
++	u32 fourcc;
++	unsigned int bpp;
++};
++
++static const struct panel_mipi_dbi_format panel_mipi_dbi_formats[] = {
++	{ "r5g6b5", DRM_FORMAT_RGB565, 16 },
++	{ "b6x2g6x2r6x2", DRM_FORMAT_RGB888, 24 },
++};
++
++static int panel_mipi_dbi_get_format(struct device *dev, u32 *formats, unsigned int *bpp)
++{
++	const char *format_name;
++	unsigned int i;
++	int ret;
+ 
++	formats[1] = DRM_FORMAT_XRGB8888;
++
++	ret = device_property_read_string(dev, "format", &format_name);
++	if (ret) {
++		/* Old device trees have no format property and mean RGB565. */
++		formats[0] = DRM_FORMAT_RGB565;
++		*bpp = 16;
++		return 0;
++	}
++
++	for (i = 0; i < ARRAY_SIZE(panel_mipi_dbi_formats); i++) {
++		const struct panel_mipi_dbi_format *format = &panel_mipi_dbi_formats[i];
++
++		if (strcmp(format->name, format_name))
++			continue;
++
++		formats[0] = format->fourcc;
++		*bpp = format->bpp;
++		return 0;
++	}
++
++	dev_err(dev, "Pixel format is not supported: '%s'\n", format_name);
++	return -EINVAL;
++}
++
+ static int panel_mipi_dbi_spi_probe(struct spi_device *spi)
+ {
+ 	struct device *dev = &spi->dev;
+@@ -279,6 +323,9 @@
+ 	struct drm_device *drm;
+ 	struct mipi_dbi *dbi;
+ 	struct gpio_desc *dc;
++	unsigned int bpp;
++	size_t buf_size;
++	u32 formats[2];
+ 	int ret;
+ 
+ 	dbidev = devm_drm_dev_alloc(dev, &panel_mipi_dbi_driver, struct mipi_dbi_dev, drm);
+@@ -320,10 +367,30 @@
+ 	if (IS_ERR(dbidev->driver_private))
+ 		return PTR_ERR(dbidev->driver_private);
+ 
+-	ret = mipi_dbi_dev_init(dbidev, &panel_mipi_dbi_pipe_funcs, &mode, 0);
++	ret = panel_mipi_dbi_get_format(dev, formats, &bpp);
+ 	if (ret)
+ 		return ret;
+ 
++	buf_size = DIV_ROUND_UP((size_t)mode.hdisplay * mode.vdisplay * bpp, 8);
++	ret = mipi_dbi_dev_init_with_formats(dbidev, &panel_mipi_dbi_pipe_funcs,
++					     formats, ARRAY_SIZE(formats),
++					     &mode, 0, buf_size);
++	if (ret)
++		return ret;
++
++	/*
++	 * DRM_FORMAT_RGB888 is stored little-endian and sent at 8 bits per
++	 * word, so the controller sees b8g8r8. An RGB666 panel uses the top
++	 * 6 bits of each byte: b6x2g6x2r6x2. Pair that with MADCTL BGR.
++	 */
++	dbidev->pixel_format = formats[0];
++	if (formats[0] == DRM_FORMAT_RGB888) {
++		dbi->write_memory_bpw = 8;
++		drm->mode_config.preferred_depth = 24;
++	} else {
++		drm->mode_config.preferred_depth = 16;
++	}
++
+ 	drm_mode_config_reset(drm);
+ 
+ 	ret = drm_dev_register(drm, 0);

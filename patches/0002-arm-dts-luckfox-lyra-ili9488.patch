@@ -1,0 +1,136 @@
+diff --git a/arch/arm/boot/dts/rk3506g-luckfox-lyra.dts b/arch/arm/boot/dts/rk3506g-luckfox-lyra.dts
+index 06fff3092..952d4c18d 100644
+--- a/arch/arm/boot/dts/rk3506g-luckfox-lyra.dts
++++ b/arch/arm/boot/dts/rk3506g-luckfox-lyra.dts
+@@ -13,7 +13,13 @@ / {
+ 	compatible = "rockchip,rk3506g-demo-display-control", "rockchip,rk3506";
+ 
+ 	chosen {
+-		bootargs = "earlycon=uart8250,mmio32,0xff0a0000 console=tty1 console=ttyFIQ0 snd_aloop.index=7 snd_aloop.use_raw_jiffies=1";
++		bootargs = "earlycon=uart8250,mmio32,0xff0a0000 console=tty1 console=ttyFIQ0 snd_aloop.index=7 snd_aloop.use_raw_jiffies=1 quiet loglevel=3 printk.time=0 fbcon=font:VGA8x16";
++	};
++
++	ili9488_backlight: ili9488-backlight {
++		compatible = "gpio-backlight";
++		gpios = <&gpio1 RK_PD3 GPIO_ACTIVE_HIGH>;
++		default-on;
+ 	};
+ 
+ 	vcc3v3_lcd: vcc3v3-lcd {
+@@ -63,22 +69,23 @@ &cma {
+ };
+ 
+ &dsi {
+-	status = "okay";
++	status = "disabled";
+ };
+ 
+ &dsi_dphy {
+-	status = "okay";
++	status = "disabled";
+ };
+ 
+ &dsi_in_vop {
+-	status = "okay";
++	status = "disabled";
+ };
+ 
+ &route_dsi {
+-	status = "okay";
++	status = "disabled";
+ };
+ 
+ &dsi_panel {
++	status = "disabled";
+ 	power-supply = <&vcc3v3_lcd>;
+ };
+ 
+@@ -144,3 +151,88 @@ &wdt0 {
+ &wdt1 {
+         status = "okay";
+ };
++
++/*
++ * ILI9488 on the 2048 base header.
++ * Pin 24 GPIO1_D1 RMIO29 SPI0_CLK, pin 25 GPIO1_C3 RMIO28 SPI0_MOSI,
++ * pin 22 GPIO1_D2 RMIO30 SPI0_CSN0, pin 26 GPIO1_C2 DC,
++ * pin 20 GPIO0_A2 reset, pin 21 GPIO1_D3 backlight.
++ *
++ * RMIO function number is the TRM index plus 15, because these banks use a
++ * 4-bit iomux and rockchip_set_rmio() stores (mux - 15). SPI0_CLK 67 -> 82,
++ * SPI0_MOSI 68 -> 83, SPI0_CSN0 70 -> 85.
++ *
++ * hsync/vsync lengths stay 0. panel-mipi-dbi rejects a timing whose
++ * hsync_end is past hdisplay. Landscape is MADCTL 0x28, so rotation stays 0.
++ * format b6x2g6x2r6x2 matches 8bpw RGB888 plus the BGR bit in 0x28.
++ */
++&pinctrl {
++	ili9488 {
++		ili9488_pins: ili9488-pins {
++			rockchip,pins =
++				<1 RK_PC2 RK_FUNC_GPIO &pcfg_pull_none>,
++				<0 RK_PA2 RK_FUNC_GPIO &pcfg_pull_none>,
++				<1 RK_PD3 RK_FUNC_GPIO &pcfg_pull_none>;
++		};
++	};
++
++	rm_io29 {
++		rm_io29_spi0_clk: rm-io29-spi0-clk {
++			rockchip,pins =
++				<1 RK_PD1 82 &pcfg_pull_none_drv_level_3>;
++		};
++	};
++
++	rm_io28 {
++		rm_io28_spi0_mosi: rm-io28-spi0-mosi {
++			rockchip,pins =
++				<1 RK_PC3 83 &pcfg_pull_none_drv_level_3>;
++		};
++	};
++
++	rm_io30 {
++		rm_io30_spi0_csn0: rm-io30-spi0-csn0 {
++			rockchip,pins =
++				<1 RK_PD2 85 &pcfg_pull_none_drv_level_3>;
++		};
++	};
++};
++
++&spi0 {
++	status = "okay";
++	num-cs = <1>;
++	pinctrl-names = "default";
++	pinctrl-0 = <&rm_io29_spi0_clk &rm_io28_spi0_mosi &rm_io30_spi0_csn0>;
++
++	ili9488@0 {
++		compatible = "ili9488", "panel-mipi-dbi-spi";
++		reg = <0>;
++		spi-max-frequency = <20000000>;
++		write-only;
++
++		pinctrl-names = "default";
++		pinctrl-0 = <&ili9488_pins>;
++
++		dc-gpios = <&gpio1 RK_PC2 GPIO_ACTIVE_HIGH>;
++		reset-gpios = <&gpio0 RK_PA2 GPIO_ACTIVE_LOW>;
++		backlight = <&ili9488_backlight>;
++		power-supply = <&vcc_3v3>;
++
++		width-mm = <73>;
++		height-mm = <49>;
++		rotation = <0>;
++		format = "b6x2g6x2r6x2";
++
++		panel-timing {
++			hactive = <480>;
++			vactive = <320>;
++			hback-porch = <0>;
++			hfront-porch = <0>;
++			hsync-len = <0>;
++			vback-porch = <0>;
++			vfront-porch = <0>;
++			vsync-len = <0>;
++			clock-frequency = <0>;
++		};
++	};
++};
